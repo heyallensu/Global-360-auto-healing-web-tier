@@ -51,8 +51,8 @@ resource "aws_lb_target_group" "web" {
     protocol            = "HTTP"
     port                = "traffic-port"
     matcher             = "200"
-    interval            = 30
-    timeout             = 5
+    interval            = 5
+    timeout             = 2
     healthy_threshold   = 2
     unhealthy_threshold = 2
   }
