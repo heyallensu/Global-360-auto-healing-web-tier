@@ -42,3 +42,37 @@ variable "alarm_email" {
     error_message = "alarm_email must be null or a valid email address."
   }
 }
+
+variable "instance_type" {
+  description = "ARM64 EC2 instance type used by the ASG."
+  type        = string
+  default     = "t4g.micro"
+}
+
+variable "container_image" {
+  description = "Immutable public GHCR manifest digest."
+  type        = string
+
+  validation {
+    condition     = can(regex("^ghcr\\.io/.+@sha256:[0-9a-f]{64}$", var.container_image))
+    error_message = "container_image must be a GHCR sha256 manifest digest."
+  }
+}
+
+variable "asg_min_size" {
+  description = "Minimum number of instances."
+  type        = number
+  default     = 2
+}
+
+variable "asg_desired_capacity" {
+  description = "Normal number of instances."
+  type        = number
+  default     = 2
+}
+
+variable "asg_max_size" {
+  description = "Maximum number of instances."
+  type        = number
+  default     = 4
+}
