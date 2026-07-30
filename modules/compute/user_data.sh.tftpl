@@ -3,7 +3,7 @@ set -euo pipefail
 
 exec > >(tee /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
 
-dnf install -y docker curl
+dnf install -y docker
 systemctl enable --now docker
 
 docker pull ${container_image}
