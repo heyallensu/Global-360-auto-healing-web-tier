@@ -1,0 +1,128 @@
+name: Terraform
+
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to plan
+        type: choice
+        options: [staging, production]
+        default: staging
+      run_plan:
+        description: Run an authenticated Terraform plan
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate ${{ matrix.environment }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [staging, production]
+    steps:
+      - name: Checkout v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+      - name: Setup Terraform v3
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        with:
+          terraform_version: 1.15.8
+
+      - name: Validate environment root
+        run: make validate-env ENV=${{ matrix.environment }}
+
+  quality:
+    name: Quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+    steps:
+      - name: Checkout v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+
+      - name: Setup TFLint v5
+        uses: terraform-linters/setup-tflint@ae78205cfffec9e8d93fd2b3115c7e9d3166d4b6
+        with:
+          tflint_version: v0.64.0
+
+      - name: Setup Trivy v0.2.6
+        uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514
+        with:
+          version: v0.69.3
+
+      - name: Repository lint and security scan
+        run: make quality-global
+
+      - name: SonarQube scan
+        if: >-
+          env.SONAR_TOKEN != '' &&
+          env.SONAR_HOST_URL != '' &&
+          ((github.event_name == 'pull_request' && github.base_ref == 'main') ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+        uses: SonarSource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f
+
+  plan:
+    name: Plan ${{ inputs.environment }}
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.run_plan == true &&
+      ((inputs.environment == 'staging' && github.ref == 'refs/heads/develop') ||
+      (inputs.environment == 'production' && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: terraform-plan-${{ inputs.environment }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+      - name: Setup Terraform v3
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        with:
+          terraform_version: 1.15.8
+
+      - name: Configure AWS Credentials v6.1.2
+        uses: aws-actions/configure-aws-credentials@acca2b1b2070338fb9fd1ca27ecee81d687e58e5
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          role-session-name: global-360-${{ inputs.environment }}-plan
+          aws-region: ap-southeast-2
+          mask-aws-account-id: true
+
+      - name: Prepare environment files
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          TF_STATE_KMS_KEY_ARN: ${{ vars.TF_STATE_KMS_KEY_ARN }}
+          CONTAINER_IMAGE: ${{ vars.CONTAINER_IMAGE }}
+        run: |
+          test -n "$TF_STATE_BUCKET"
+          test -n "$TF_STATE_KMS_KEY_ARN"
+          test -n "$CONTAINER_IMAGE"
+          cp "environments/${ENVIRONMENT}/backend.hcl.example" "environments/${ENVIRONMENT}/backend.hcl"
+          sed -i "s|REPLACE_WITH_BOOTSTRAP_OUTPUT|${TF_STATE_BUCKET}|" "environments/${ENVIRONMENT}/backend.hcl"
+          sed -i "s|REPLACE_WITH_BOOTSTRAP_KMS_KEY_ARN|${TF_STATE_KMS_KEY_ARN}|" "environments/${ENVIRONMENT}/backend.hcl"
+          cp "environments/${ENVIRONMENT}/terraform.tfvars.example" "environments/${ENVIRONMENT}/terraform.tfvars"
+          sed -i "s|ghcr.io/heyallensu/global-360-auto-healing-web-tier@sha256:REPLACE_WITH_64_HEX_CHARACTERS|${CONTAINER_IMAGE}|" "environments/${ENVIRONMENT}/terraform.tfvars"
+
+      - name: Terraform plan
+        run: make plan ENV=${{ inputs.environment }}
