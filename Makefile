@@ -12,7 +12,7 @@ PLAN_PATH := $(TF_DIR)/$(PLAN_FILE)
 TFLINT_CONFIG := $(CURDIR)/.tflint.hcl
 IMAGE ?= global-360-web:test
 
-.PHONY: check-env fmt fmt-check init init-ci lock validate lint scan validate-env quality-global check plan apply destroy output docker-build sonar
+.PHONY: check-env fmt fmt-check init init-ci lock validate lint scan validate-env quality-global check plan apply deploy destroy output docker-build sonar
 
 check-env:
 	@test "$(ENV)" = "staging" -o "$(ENV)" = "production" || (echo "ENV must be staging or production" && exit 1)
@@ -59,6 +59,9 @@ apply: init
 	terraform -chdir=$(TF_DIR) show $(PLAN_FILE)
 	terraform -chdir=$(TF_DIR) apply -lock-timeout=5m $(PLAN_FILE)
 	rm -f $(PLAN_PATH)
+
+deploy: plan
+	$(MAKE) apply ENV=$(ENV)
 
 destroy: init
 	@test -f $(VAR_PATH) || (echo "Missing $(VAR_PATH)" && exit 1)
