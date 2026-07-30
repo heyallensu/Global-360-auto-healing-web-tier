@@ -6,27 +6,15 @@ There isn't a live URL now. I deployed the staging environment, checked it, and 
 
 ## Architecture
 
-```mermaid
-flowchart TB
-    Internet -->|HTTP 80| ALB[ALB - public subnets]
-    ALB --> TG[Target Group]
-    TG --> EC2A[EC2 - private subnet AZ A]
-    TG --> EC2B[EC2 - private subnet AZ B]
-    ASG[Auto Scaling Group] -. manages .-> EC2A
-    ASG -. manages .-> EC2B
-    EC2A -->|outbound| NAT[NAT Gateway - public subnet AZ A]
-    EC2B -->|outbound| NAT
-    NAT --> IGW[Internet Gateway]
-    IGW --> Internet
-    ALB -. metrics .-> CloudWatch
-    CloudWatch -. alarm .-> SNS
-```
+![AWS architecture for the Global 360 web tier](docs/architecture.svg)
+
+[Editable draw.io source](docs/architecture.drawio)
 
 Traffic comes in through the ALB and is sent only to healthy targets on port 80. The NAT Gateway is only for outbound traffic from the private instances, mainly package installation and pulling the container image.
 
 The target group calls `GET /healthz` every 30 seconds. Two failed checks mark a target unhealthy. The ASG uses ELB health checks, so it should terminate that instance and launch a replacement from the launch template. The other healthy target remains available while this happens.
 
-The group runs two instances by default and can scale from 2 to 4. I set CPU target tracking to 80%. That is high, but this is a low-CPU static site and I did not want short spikes adding assessment cost.
+The group runs two instances by default and can scale from 2 to 4. Launch template changes use a rolling instance refresh that keeps the current capacity healthy and rolls back on failure. I set CPU target tracking to 80%. That is high, but this is a low-CPU static site and I did not want short spikes adding assessment cost.
 
 ## Key choices
 
