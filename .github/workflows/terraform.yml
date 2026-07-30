@@ -67,11 +67,13 @@ jobs:
       - name: Repository lint and security scan
         run: make quality-global
 
-      - name: Require SonarQube configuration
-        run: test -n "$SONAR_TOKEN" -a -n "$SONAR_HOST_URL"
-
       - name: SonarQube scan
-        run: make sonar
+        if: >-
+          env.SONAR_TOKEN != '' &&
+          env.SONAR_HOST_URL != '' &&
+          ((github.event_name == 'pull_request' && github.base_ref == 'main') ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+        uses: SonarSource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f
 
   plan:
     name: Plan ${{ inputs.environment }}

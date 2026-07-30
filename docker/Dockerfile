@@ -6,8 +6,8 @@ RUN test -s index.html
 
 FROM nginxinc/nginx-unprivileged:1.31-alpine3.24@sha256:59ccf0943b0b8e8d9e6ea9039a39555730f544701a655c596f7df7d096c593f5
 
-COPY --chown=101:101 nginx.conf /etc/nginx/conf.d/default.conf
-COPY --from=content --chown=101:101 /content/ /usr/share/nginx/html/
+COPY --chown=0:0 nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=content --chown=0:0 /content/ /usr/share/nginx/html/
 
 USER 101
 EXPOSE 8080

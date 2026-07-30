@@ -64,6 +64,7 @@ Terraform commands run from an environment root rather than the repository root.
 - AWS CLI v2
 - jq
 - Make
+- Actionlint `1.7.x`
 - TFLint `0.64.x`
 - Trivy `0.69.x`
 - Docker with Buildx if building the image locally
@@ -179,7 +180,7 @@ feature/* -> develop -> main
             staging    production
 ```
 
-Pull requests to `develop` and `main` run Terraform validation, TFLint, Trivy, and SonarQube. Pushes build and publish the multi-architecture image, then scan the pushed digest.
+Pull requests to `develop` and `main` run Terraform validation, TFLint, and Trivy. SonarQube runs for pull requests to `main` and pushes to `main`; its free plan does not provide branch analysis for `develop`. Pushes build and publish the multi-architecture image, then scan the pushed digest.
 
 Authenticated Terraform plans are manual. A staging plan can run only from `develop`, and a production plan only from `main`. GitHub Actions assumes an AWS role through OIDC, so there are no long-lived AWS access keys in the repository.
 
@@ -201,9 +202,11 @@ For this assessment the stack is meant to be short-lived. Eight hours is roughly
 
 ## What I verified
 
-I ran Terraform format and validation for both environments, followed by `make lint` and `make scan`. The configured high/critical gate passed with four accepted exceptions: `AVD-AWS-0053` and `AVD-AWS-0054` cover the public, HTTP-only ALB required for this assessment; `AVD-AWS-0095` covers the unencrypted SNS topic; and `AVD-AWS-0104` covers unrestricted TCP 443 egress used for package downloads, image pulls, and Session Manager.
+I ran Terraform format and validation for both environments, Actionlint against the workflows, followed by `make lint` and `make scan`. The configured high/critical gate passed with four accepted exceptions: `AVD-AWS-0053` and `AVD-AWS-0054` cover the public, HTTP-only ALB required for this assessment; `AVD-AWS-0095` covers the unencrypted SNS topic; and `AVD-AWS-0104` covers unrestricted TCP 443 egress used for package downloads, image pulls, and Session Manager.
 
 Those IDs are repository-wide suppressions in `.trivyignore`, so they would also hide matching findings on future resources. I would scope them more tightly before extending the repository. For a production deployment I would also add HTTPS and encrypt the SNS topic rather than retain those two exceptions.
+
+The SonarQube exclusions are narrower: each one matches a rule and file. They cover tag-plus-digest image pinning, omitted access-log buckets for this short-lived stack, the required HTTP listener, and the non-sensitive SNS alarm topic.
 
 The staging deployment had two private `t4g.micro` instances in different Availability Zones, and both targets were healthy. `/healthz` returned `ok`, the root returned HTTP 200, and a second Terraform plan had no changes.
 

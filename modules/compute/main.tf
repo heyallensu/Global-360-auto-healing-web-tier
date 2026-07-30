@@ -70,7 +70,10 @@ resource "aws_launch_template" "web" {
     name = aws_iam_instance_profile.instance.name
   }
 
-  vpc_security_group_ids = [aws_security_group.instance.id]
+  network_interfaces {
+    associate_public_ip_address = false
+    security_groups             = [aws_security_group.instance.id]
+  }
 
   metadata_options {
     http_endpoint               = "enabled"
