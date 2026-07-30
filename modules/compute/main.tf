@@ -126,6 +126,17 @@ resource "aws_autoscaling_group" "web" {
     version = aws_launch_template.web.latest_version
   }
 
+  instance_refresh {
+    strategy = "Rolling"
+
+    preferences {
+      auto_rollback          = true
+      max_healthy_percentage = 150
+      min_healthy_percentage = 100
+      skip_matching          = true
+    }
+  }
+
   tag {
     key                 = "Name"
     value               = "${var.name_prefix}-web"
