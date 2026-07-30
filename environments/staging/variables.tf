@@ -30,3 +30,15 @@ variable "vpc_cidr" {
   type        = string
   default     = "10.0.0.0/16"
 }
+
+variable "alarm_email" {
+  description = "Optional email address for SNS alarm notifications."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.alarm_email == null ? true : can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", var.alarm_email))
+    error_message = "alarm_email must be null or a valid email address."
+  }
+}
