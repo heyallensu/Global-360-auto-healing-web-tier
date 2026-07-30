@@ -1,74 +1,209 @@
 # Global 360 Auto-Healing Web Tier
 
-This is my implementation of a small self-healing web tier on AWS. Terraform builds an ALB and an Auto Scaling group across two Availability Zones. The EC2 instances run NGINX in Docker and stay in private subnets with no SSH access.
-
-There isn't a live URL now. I deployed the staging environment, checked it, and then tore it down to avoid leaving assessment infrastructure running.
-
-## Architecture
-
-![AWS architecture for the Global 360 web tier](docs/architecture.svg)
-
-[Editable draw.io source](docs/architecture.drawio)
-
-Traffic comes in through the ALB and is sent only to healthy targets on port 80. The NAT Gateway is only for outbound traffic from the private instances, mainly package installation and pulling the container image.
-
-The target group calls `GET /healthz` every 30 seconds. Two failed checks mark a target unhealthy. The ASG uses ELB health checks, so it should terminate that instance and launch a replacement from the launch template. The other healthy target remains available while this happens.
-
-The group runs two instances by default and can scale from 2 to 4. Launch template changes use a rolling instance refresh that keeps the current capacity healthy and rolls back on failure. I set CPU target tracking to 80%. That is high, but this is a low-CPU static site and I did not want short spikes adding assessment cost.
-
-## Key choices
-
-I used `t4g.micro` Graviton instances because they are inexpensive and the image is built for ARM64 as well as AMD64. The instances have encrypted gp3 volumes, require IMDSv2, and are managed through Session Manager. There is no key pair, public IP, bastion, SSH rule, or port 22.
-
-I kept the instances private and made the ALB security group the only source allowed into port 80. That leaves one public entry point: the ALB's HTTP listener. For a real public service I would add a domain, ACM certificate, and HTTPS listener.
-
-I went with one NAT Gateway to keep the assessment cost down. Losing that NAT or its AZ removes internet egress from both private subnets. Existing healthy containers can still serve through the ALB, but replacement bootstrap, image pulls, and Session Manager are affected. I did not test that failure mode. For production I would use one NAT per AZ or remove the dependency with private endpoints and an internal image source.
-
-Terraform state is kept in a versioned S3 bucket with KMS encryption and native S3 state locking. Staging and production have separate root modules and state, but both reuse the modules under `modules/`.
+This repository contains a small auto-healing web tier built on AWS with Terraform. An Application Load Balancer distributes HTTP traffic across two EC2 instances in separate Availability Zones, while an Auto Scaling group maintains capacity and replaces unhealthy instances. Each instance pulls and runs the NGINX site as a Docker container.
 
 ## Repository layout
 
 ```text
 .
-├── bootstrap/              # S3 backend and KMS key
+├── bootstrap/              # S3 remote state and KMS key
 ├── environments/
-│   ├── staging/
-│   └── production/
+│   ├── staging/            # Staging root module and state
+│   └── production/         # Production root module and state
 ├── modules/
-│   ├── network/
-│   ├── alb/
-│   └── compute/
-├── docker/
-├── .github/workflows/
-├── Makefile
-└── sonar-project.properties
+│   ├── network/            # VPC, subnets, routing, and NAT
+│   ├── alb/                # Load balancer, health checks, and alarms
+│   └── compute/            # Launch template, ASG, IAM, and scaling
+├── docker/                 # NGINX image and static page
+├── docs/                   # Architecture diagram
+├── .github/workflows/      # Terraform and container pipelines
+└── Makefile                # Local validation and deployment commands
 ```
 
-Terraform commands run from an environment root rather than the repository root. This keeps each environment's state and lifecycle separate.
+Staging and production use separate Terraform state while sharing the same modules.
+
+## Architecture
+
+![AWS architecture for the Global 360 web tier](docs/architecture.svg)
+
+The ALB is the only public entry point. It forwards traffic to healthy instances on port 80, and the instance security group accepts that traffic only from the ALB security group.
+
+The two web instances run in private subnets across separate Availability Zones. A single NAT Gateway provides outbound access for package installation, the container image pull, and Session Manager. The ASG normally runs two instances and can scale out to four.
+
+## Why AWS
+
+I chose AWS because Application Load Balancing and EC2 Auto Scaling provide native health-based routing and capacity replacement. AWS also has mature Terraform support and offers Graviton instances that suit a small, low-CPU static workload.
+
+The deployment targets the Sydney region (`ap-southeast-2`).
+
+## Requirement coverage
+
+### Must-haves
+
+- **Self-healing**
+
+  The target group checks `/healthz` every five seconds, and the ASG uses ELB health status rather than EC2 status alone. If an instance stops passing the application health check, it is removed from load-balancer rotation and the ASG is configured to replace it.
+
+  The ASG configuration is in `modules/compute/main.tf`:
+
+  ```hcl
+  resource "aws_autoscaling_group" "web" {
+    min_size            = var.min_size
+    desired_capacity    = var.desired_capacity
+    max_size            = var.max_size
+    vpc_zone_identifier = var.private_subnet_ids
+    target_group_arns   = [var.target_group_arn]
+
+    health_check_type         = "ELB"
+    health_check_grace_period = 180
+  }
+  ```
+
+- **Self-provisioning and idempotence**
+
+  Terraform owns the network, load balancer, compute, IAM, monitoring, and bootstrap configuration. After the one-time backend and variable setup, the environment is planned and applied through the Makefile. A repeated staging plan returned no changes.
+
+  The deployment commands are defined in `Makefile`:
+
+  ```makefile
+  plan: init
+	terraform -chdir=$(TF_DIR) plan -input=false -lock-timeout=5m \
+	  -var-file=$(VAR_FILE) -out=$(PLAN_FILE)
+
+  apply: init
+	terraform -chdir=$(TF_DIR) show $(PLAN_FILE)
+	terraform -chdir=$(TF_DIR) apply -lock-timeout=5m $(PLAN_FILE)
+
+  deploy: plan
+	$(MAKE) apply ENV=$(ENV)
+  ```
+
+- **N + 1 capacity**
+
+  The ASG maintains two instances across separate Availability Zones, providing one redundant instance if either instance becomes unavailable.
+
+  The default capacity is defined in `environments/staging/variables.tf`:
+
+  ```hcl
+  variable "asg_min_size" {
+    default = 2
+  }
+
+  variable "asg_desired_capacity" {
+    default = 2
+  }
+  ```
+
+- **Static web page**
+
+  NGINX serves a small project page and exposes a separate `/healthz` endpoint for the ALB.
+
+  The page is stored in `docker/html/index.html`:
+
+  ```html
+  <h1>Global 360 Auto-Healing Web Tier</h1>
+  <p>Served by NGINX on an EC2 Auto Scaling Group.</p>
+  ```
+
+### Bonus
+
+- **Containerised application**
+
+  The Docker image uses pinned base-image digests, runs as the unprivileged NGINX user, and includes a container health check. GitHub Actions is configured to publish ARM64 and AMD64 images to GHCR, and EC2 user-data pulls the selected manifest by digest.
+
+  The main image configuration is in `docker/Dockerfile`:
+
+  ```dockerfile
+  FROM nginxinc/nginx-unprivileged:1.31-alpine3.24@sha256:59ccf0943b0b8e8d9e6ea9039a39555730f544701a655c596f7df7d096c593f5
+
+  COPY --chown=0:0 nginx.conf /etc/nginx/conf.d/default.conf
+  COPY --from=content --chown=0:0 /content/ /usr/share/nginx/html/
+
+  USER 101
+  EXPOSE 8080
+  ```
+
+- **Pipeline**
+
+  The Terraform workflow is configured to run formatting, validation, TFLint, and Trivy checks. Authenticated plans are manual and use GitHub OIDC instead of stored AWS access keys. A separate workflow builds and scans the container image.
+
+  The validation matrix is defined in `.github/workflows/terraform.yml`:
+
+  ```yaml
+  strategy:
+    matrix:
+      environment: [staging, production]
+
+  steps:
+    - name: Validate environment root
+      run: make validate-env ENV=${{ matrix.environment }}
+  ```
+
+## Estimated monthly cost
+
+An always-on deployment in AWS Sydney is approximately **AUD 130–135 per month** before tax and significant data transfer.
+
+The main costs are:
+
+- NAT Gateway and its public IPv4 address: about AUD 67/month
+- ALB, two public IPv4 addresses, and light LCU usage: about AUD 37/month
+- Two `t4g.micro` instances: about AUD 23/month
+- EBS, KMS, state storage, and monitoring: about AUD 4/month
+
+If further cost reduction is required, these changes could reduce the estimate by up to approximately **53%**, bringing it to around **AUD 63 per month**:
+
+- Replace the managed NAT Gateway with a self-healing `fck-nat` instance. Keeping the web tier on `t4g.micro` would reduce the estimate to about **AUD 73 per month**.
+- Change the web instances from `t4g.micro` to `t4g.nano`, reducing the estimate further to around **AUD 63 per month**.
+
+**Trade-off:** `fck-nat` moves responsibility for patching, routing, ENI/EIP failover, monitoring, and recovery from AWS to this project. The `t4g.nano` instances also provide only 512 MiB of memory, leaving less headroom for the operating system, Docker, NGINX, cloud-init, and the SSM Agent.
+
+Based on the pricing assumptions above, this managed-ALB architecture would not meet the AUD 20 target: the ALB and its two public IPv4 addresses alone cost about **AUD 37 per month**, before adding either EC2 instance.
+
+## Key design decisions and trade-offs
+
+### Private instances
+
+The web instances have no public IP addresses, SSH rule, key pair, or bastion. IMDSv2 is required, EBS volumes are encrypted, and Session Manager provides administrative access. This reduces the public attack surface but creates an outbound connectivity dependency.
+
+### Single NAT Gateway
+
+One NAT Gateway costs less than one per Availability Zone. The trade-off is that losing its Availability Zone removes outbound access from both private subnets. Existing containers can continue serving traffic, but new package downloads, image pulls, and Session Manager connections depend on that path.
+
+### Graviton instances
+
+The web tier uses `t4g.micro`. The container supports ARM64, and 1 GiB of memory provides more practical headroom for Amazon Linux, Docker, NGINX, cloud-init, and the SSM Agent than `t4g.nano`.
+
+### Saved Terraform plans
+
+`make plan` writes a saved plan and `make apply` applies that same file rather than generating a new plan during deployment. This keeps the reviewed plan separate from the apply step.
+
+### HTTP listener
+
+The current scope uses HTTP. A production public service should add a domain and terminate TLS with ACM.
 
 ## Prerequisites
 
 - Terraform `1.15.x`
 - AWS CLI v2
-- jq
+- `jq`
 - Make
 - Actionlint `1.7.x`
 - TFLint `0.64.x`
 - Trivy `0.69.x`
-- Docker with Buildx if building the image locally
+- Docker with Buildx when building the image locally
 
-The examples use `ap-southeast-2`. Check the AWS account before creating anything:
+The examples use `ap-southeast-2`. Confirm the AWS account before creating resources:
 
 ```bash
 export AWS_PROFILE=<profile>
 aws sts get-caller-identity
 ```
 
-## Deploy
+## Plan and deploy
 
-### 1. Create the remote state backend
+### 1. Bootstrap remote state
 
-The bootstrap stack uses local state because it creates the remote backend itself.
+The bootstrap stack uses local state because it creates the remote S3 backend and KMS key.
 
 ```bash
 terraform -chdir=bootstrap init
@@ -77,7 +212,7 @@ terraform -chdir=bootstrap apply bootstrap.tfplan
 terraform -chdir=bootstrap output
 ```
 
-Copy the backend example for the environment you want to use, then replace the bucket and KMS placeholders with the bootstrap outputs:
+Copy the backend example and replace its placeholders with the bootstrap outputs:
 
 ```bash
 cp environments/staging/backend.hcl.example environments/staging/backend.hcl
@@ -89,31 +224,24 @@ cp environments/staging/backend.hcl.example environments/staging/backend.hcl
 cp environments/staging/terraform.tfvars.example environments/staging/terraform.tfvars
 ```
 
-Replace the image placeholder in `terraform.tfvars`. The public image built for this project is:
+Replace the image placeholder in `terraform.tfvars`. The staging image used for this project is pinned by digest:
 
 ```text
 ghcr.io/heyallensu/global-360-auto-healing-web-tier@sha256:51f91115cb059d75111a85da1abe6905ce0354c3f160cf459205dabcc43fd982
 ```
 
-For a local container check:
-
-```bash
-make docker-build IMAGE=global-360-web:test
-```
-
-The EC2 instances cannot use that local tag. A custom image must be pushed to a registry they can reach, then pinned by digest in `terraform.tfvars`. The Docker workflow handles the multi-architecture GHCR build on a branch push.
-
-### 3. Check and deploy
+### 3. Check, plan, and optionally apply
 
 ```bash
 make check ENV=staging
 make plan ENV=staging
 terraform -chdir=environments/staging show staging.tfplan
 make apply ENV=staging
-make output ENV=staging
 ```
 
-`make apply` only accepts the saved plan from `make plan`.
+Stop after reviewing the saved plan if only plan output is required. `make apply` uses only the plan produced by `make plan`.
+
+For a one-command deployment, run `make deploy ENV=staging`. This creates a saved plan and applies that same plan.
 
 ### 4. Check the running service
 
@@ -123,7 +251,9 @@ curl -fsS "${ALB_URL}/healthz"
 curl -I "${ALB_URL}"
 ```
 
-`/healthz` should return `ok`, and the root path should return HTTP 200. An unchanged deployment should also produce an empty plan:
+`/healthz` should return `ok`, and the root path should return HTTP 200.
+
+Run a second plan to check idempotence:
 
 ```bash
 terraform -chdir=environments/staging plan \
@@ -133,30 +263,17 @@ terraform -chdir=environments/staging plan \
   -detailed-exitcode
 ```
 
+Exit code `0` means the second plan contains no changes.
+
 ### 5. Clean up
 
-Destroy the environment before deleting its state backend:
+Destroy the application environment before removing its state backend:
 
 ```bash
 make destroy ENV=staging
 ```
 
-The versioned S3 bucket must be emptied before destroying the bootstrap stack. Keep the local bootstrap state until this finishes:
-
-```bash
-BUCKET="$(terraform -chdir=bootstrap output -raw state_bucket_name)"
-DELETE_REQUEST="$(aws s3api list-object-versions --bucket "$BUCKET" | \
-  jq -c '{Objects: ((.Versions // []) + (.DeleteMarkers // []) |
-    map({Key, VersionId})), Quiet: true}')"
-
-if [ "$(jq '.Objects | length' <<<"$DELETE_REQUEST")" -gt 0 ]; then
-  aws s3api delete-objects --bucket "$BUCKET" --delete "$DELETE_REQUEST"
-fi
-
-terraform -chdir=bootstrap destroy
-```
-
-KMS keys are scheduled for deletion, so they remain in `PendingDeletion` for the configured seven-day window.
+The versioned S3 bucket must be emptied before the bootstrap stack can be destroyed. KMS key deletion uses a seven-day waiting period.
 
 ## CI/CD
 
@@ -168,43 +285,23 @@ feature/* -> develop -> main
             staging    production
 ```
 
-Pull requests to `develop` and `main` run Terraform validation, TFLint, and Trivy. SonarQube runs for pull requests to `main` and pushes to `main`; its free plan does not provide branch analysis for `develop`. Pushes build and publish the multi-architecture image, then scan the pushed digest.
+Pull requests to `develop` and `main` are configured to run Terraform validation, TFLint, and Trivy. SonarQube runs for pull requests to `main` and pushes to `main`; its free plan does not provide branch analysis for `develop`.
 
-Authenticated Terraform plans are manual. A staging plan can run only from `develop`, and a production plan only from `main`. GitHub Actions assumes an AWS role through OIDC, so there are no long-lived AWS access keys in the repository.
+Authenticated plans are manual. A staging plan can run only from `develop`, and a production plan only from `main`. GitHub Actions assumes an AWS role through OIDC, so there are no long-lived AWS access keys in the repository.
 
-The CI plan is advisory and is not kept as a build artifact. To deploy, the operator runs `make plan` locally, reviews that saved plan, and then runs `make apply`. The Makefile applies the same local plan that was reviewed.
+The container workflow builds the image for ARM64 and AMD64, publishes it to GHCR on branch pushes, and scans the pushed digest.
 
-The plan job expects `AWS_PLAN_ROLE_ARN`, `TF_STATE_BUCKET`, `TF_STATE_KMS_KEY_ARN`, and `CONTAINER_IMAGE` as GitHub environment variables. SonarQube uses `SONAR_HOST_URL` as a variable and `SONAR_TOKEN` as a secret.
+## Verification
 
-## Cost
+Completed checks included Terraform formatting and validation for both environments, Actionlint, TFLint, and Trivy.
 
-An always-on deployment does not fit the AUD 20 target. My rough monthly estimate for Sydney is:
+The staging deployment registered two healthy `t4g.micro` targets in separate Availability Zones. `/healthz` returned `ok`, the root path returned HTTP 200, and a second Terraform plan returned no changes. Session Manager also confirmed that Docker was active and both containers were healthy.
 
-- NAT Gateway: about USD 43
-- ALB and light LCU usage: about USD 24
-- Two `t4g.micro` instances: about USD 16
-- Storage, public IPv4 addresses, KMS, and alarms: about USD 13
-- Total: roughly USD 95-100 per month, before tax and data transfer
+Self-healing was tested by terminating an EC2 instance and, separately, stopping the application container. In both cases, the ASG replaced the unhealthy instance and the target group returned to two healthy targets.
 
-For this assessment the stack is meant to be short-lived. Eight hours is roughly USD 1-2, depending on traffic. The NAT Gateway and ALB are the main fixed costs.
+The staging environment and remote-state resources were destroyed after these checks.
 
-## What I verified
+## Further work
 
-I ran Terraform format and validation for both environments, Actionlint against the workflows, followed by `make lint` and `make scan`. The configured high/critical gate passed with four accepted exceptions: `AVD-AWS-0053` and `AVD-AWS-0054` cover the public, HTTP-only ALB required for this assessment; `AVD-AWS-0095` covers the unencrypted SNS topic; and `AVD-AWS-0104` covers unrestricted TCP 443 egress used for package downloads, image pulls, and Session Manager.
-
-Those IDs are repository-wide suppressions in `.trivyignore`, so they would also hide matching findings on future resources. I would scope them more tightly before extending the repository. For a production deployment I would also add HTTPS and encrypt the SNS topic rather than retain those two exceptions.
-
-The SonarQube exclusions are narrower: each one matches a rule and file. They cover tag-plus-digest image pinning, omitted access-log buckets for this short-lived stack, the required HTTP listener, and the non-sensitive SNS alarm topic.
-
-The staging deployment had two private `t4g.micro` instances in different Availability Zones, and both targets were healthy. `/healthz` returned `ok`, the root returned HTTP 200, and a second Terraform plan had no changes.
-
-I also used Session Manager to confirm that Docker was active and both containers were healthy. The first rollout exposed an Amazon Linux 2023 package conflict between `curl-minimal` and `curl`; the bootstrap now installs Docker without replacing the system curl package.
-
-I did not run the destructive instance-termination or application-failure tests. The ALB and ASG configuration for self-healing is in place, but I would not claim the full replacement path as tested yet. The staging workload and remote-state resources were destroyed after the checks above.
-
-## If I had more time
-
-- Run both failure scenarios and record replacement time and client-visible errors
+- Evaluate `fck-nat` as a lower-cost NAT option
 - Add HTTPS with ACM and Route 53
-- Add a second NAT Gateway or remove the outbound dependency
-- Add automated module tests with Terratest
