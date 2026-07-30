@@ -1,58 +1,3 @@
-data "aws_caller_identity" "current" {}
-
-data "aws_iam_policy_document" "sns_kms" {
-  statement {
-    sid       = "EnableAccountAdministration"
-    actions   = ["kms:*"]
-    resources = ["*"]
-
-    principals {
-      type        = "AWS"
-      identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]
-    }
-  }
-
-  statement {
-    sid = "AllowCloudWatch"
-    actions = [
-      "kms:Decrypt",
-      "kms:GenerateDataKey*"
-    ]
-    resources = ["*"]
-
-    principals {
-      type        = "Service"
-      identifiers = ["cloudwatch.amazonaws.com"]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "aws:SourceAccount"
-      values   = [data.aws_caller_identity.current.account_id]
-    }
-  }
-
-  statement {
-    sid = "AllowSNS"
-    actions = [
-      "kms:Decrypt",
-      "kms:GenerateDataKey*"
-    ]
-    resources = ["*"]
-
-    principals {
-      type        = "Service"
-      identifiers = ["sns.amazonaws.com"]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "aws:SourceAccount"
-      values   = [data.aws_caller_identity.current.account_id]
-    }
-  }
-}
-
 resource "aws_security_group" "alb" {
   name        = "${var.name_prefix}-alb-sg"
   description = "Allow public HTTP and forward HTTP to VPC targets"
@@ -88,11 +33,8 @@ resource "aws_lb" "this" {
   security_groups    = [aws_security_group.alb.id]
   subnets            = var.public_subnet_ids
 
-  desync_mitigation_mode                      = "strictest"
-  drop_invalid_header_fields                  = true
-  enable_deletion_protection                  = false
-  enable_http2                                = true
-  enable_tls_version_and_cipher_suite_headers = false
+  desync_mitigation_mode     = "strictest"
+  drop_invalid_header_fields = true
 }
 
 resource "aws_lb_target_group" "web" {
@@ -127,21 +69,8 @@ resource "aws_lb_listener" "http" {
   }
 }
 
-resource "aws_kms_key" "sns" {
-  description             = "KMS key for ${var.name_prefix} alarm notifications"
-  deletion_window_in_days = 7
-  enable_key_rotation     = true
-  policy                  = data.aws_iam_policy_document.sns_kms.json
-}
-
-resource "aws_kms_alias" "sns" {
-  name          = "alias/${var.name_prefix}-alarms"
-  target_key_id = aws_kms_key.sns.key_id
-}
-
 resource "aws_sns_topic" "alarms" {
-  name              = "${var.name_prefix}-alarms"
-  kms_master_key_id = aws_kms_key.sns.arn
+  name = "${var.name_prefix}-alarms"
 }
 
 resource "aws_sns_topic_subscription" "email" {

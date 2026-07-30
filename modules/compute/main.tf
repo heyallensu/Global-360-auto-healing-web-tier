@@ -66,8 +66,6 @@ resource "aws_launch_template" "web" {
     container_image = var.container_image
   }))
 
-  update_default_version = true
-
   iam_instance_profile {
     name = aws_iam_instance_profile.instance.name
   }
@@ -78,11 +76,6 @@ resource "aws_launch_template" "web" {
     http_endpoint               = "enabled"
     http_put_response_hop_limit = 1
     http_tokens                 = "required"
-    instance_metadata_tags      = "disabled"
-  }
-
-  monitoring {
-    enabled = true
   }
 
   block_device_mappings {
@@ -128,17 +121,6 @@ resource "aws_autoscaling_group" "web" {
   launch_template {
     id      = aws_launch_template.web.id
     version = aws_launch_template.web.latest_version
-  }
-
-  instance_refresh {
-    strategy = "Rolling"
-
-    preferences {
-      instance_warmup        = 180
-      max_healthy_percentage = 200
-      min_healthy_percentage = 100
-      skip_matching          = true
-    }
   }
 
   tag {

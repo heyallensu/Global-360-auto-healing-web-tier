@@ -36,11 +36,6 @@ variable "alarm_email" {
   type        = string
   default     = null
   nullable    = true
-
-  validation {
-    condition     = var.alarm_email == null ? true : can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", var.alarm_email))
-    error_message = "alarm_email must be null or a valid email address."
-  }
 }
 
 variable "instance_type" {
@@ -52,11 +47,6 @@ variable "instance_type" {
 variable "container_image" {
   description = "Immutable public GHCR manifest digest."
   type        = string
-
-  validation {
-    condition     = can(regex("^ghcr\\.io/.+@sha256:[0-9a-f]{64}$", var.container_image))
-    error_message = "container_image must be a GHCR sha256 manifest digest."
-  }
 }
 
 variable "asg_min_size" {

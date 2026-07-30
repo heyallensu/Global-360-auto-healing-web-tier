@@ -17,8 +17,3 @@ output "sns_topic_arn" {
   description = "SNS topic used by CloudWatch alarms."
   value       = aws_sns_topic.alarms.arn
 }
-
-output "sns_kms_key_arn" {
-  description = "KMS key encrypting alarm notifications."
-  value       = aws_kms_key.sns.arn
-}

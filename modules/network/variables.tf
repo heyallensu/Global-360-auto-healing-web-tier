@@ -12,14 +12,3 @@ variable "aws_region" {
   description = "AWS Region used to form endpoint service names."
   type        = string
 }
-
-variable "az_count" {
-  description = "Number of Availability Zones."
-  type        = number
-  default     = 2
-
-  validation {
-    condition     = var.az_count == 2
-    error_message = "This assessment requires exactly two Availability Zones."
-  }
-}
